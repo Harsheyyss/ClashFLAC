@@ -1,11 +1,14 @@
 const isLocalDev = typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
-const DEFAULT_API_BASE = isLocalDev ? (window.location.port === "5173" ? "" : "http://127.0.0.1:8000") : "https://clashflac-production-2f48.up.railway.app";
+const isCloudflarePages = typeof window !== "undefined" && window.location.hostname.endsWith("pages.dev");
+const DEFAULT_API_BASE = isLocalDev 
+    ? (window.location.port === "5173" ? "" : "http://127.0.0.1:8000") 
+    : (isCloudflarePages ? "https://clashflac.kanjijewels.com" : "");
 const PREVIEW_API = "https://jiosavan.clashgram.workers.dev/api";
 
 const savedApi = localStorage.getItem("clash-api-base");
-const activeApi = isLocalDev
-  ? DEFAULT_API_BASE
-  : ((!savedApi || savedApi.includes("clashflac-production.up.railway.app") || savedApi.includes("clashflac.up.railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788")) ? DEFAULT_API_BASE : savedApi);
+const activeApi = (!savedApi || savedApi.includes("railway.app") || savedApi.includes("localhost") || savedApi.includes("127.0.0.1") || savedApi.includes(":8787") || savedApi.includes(":8788"))
+    ? DEFAULT_API_BASE
+    : savedApi;
 
 // Engine Priority Hierarchy: 1) Qobuz, 2) Amazon, 3) Tidal
 const savedPriority = localStorage.getItem("clash-engine-priority");
@@ -1307,7 +1310,7 @@ function renderResults() {
         if (track.streamType === "full") {
             previewBadge = '<span class="badge preview">Hi-Fi Stream</span>';
         } else if (track.streamType === "qobuz-hifi") {
-            previewBadge = '<span class="badge preview qobuz-badge">Qobuz Hi-Fi (320k)</span>';
+            previewBadge = '<span class="badge preview qobuz-badge">Qobuz Hi-Res FLAC</span>';
         } else if (track.streamType === "spotify-30s") {
             previewBadge = '<span class="badge preview">30s Preview</span>';
         }

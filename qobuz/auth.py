@@ -33,11 +33,23 @@ class QobuzAuth:
         self.user_email: Optional[str] = os.getenv("QOBUZ_EMAIL")
         self.membership_label: Optional[str] = None
         self.tested_valid_secret: Optional[str] = None
+        self.accounts: List[Dict[str, Any]] = []
+        self.active_index: int = 0
         
         self.load_tokens()
 
     def load_tokens(self):
-        # 1. Try config/qobuz_tokens.json
+        # 1. Parse all accounts from QOBUZ_ACCOUNTS_JSON if available
+        accs_raw = (os.getenv("QOBUZ_ACCOUNTS_JSON") or "").strip()
+        if accs_raw:
+            try:
+                parsed = json.loads(accs_raw)
+                if isinstance(parsed, list):
+                    self.accounts = parsed
+            except Exception as e:
+                logger.warning(f"Failed parsing QOBUZ_ACCOUNTS_JSON: {e}")
+
+        # 2. Try config/qobuz_tokens.json
         for path in [QobuzConfig.TOKEN_FILE, QobuzConfig.ROOT_TOKEN_FILE]:
             if path.is_file():
                 try:
@@ -48,7 +60,7 @@ class QobuzAuth:
                 except Exception as e:
                     logger.warning(f"Failed loading Qobuz tokens from {path}: {e}")
 
-        # 2. Try env vars
+        # 3. Try env vars
         b64_creds = (os.getenv("QOBUZ_CREDENTIALS_BASE64") or "").strip()
         if b64_creds:
             try:
@@ -59,20 +71,43 @@ class QobuzAuth:
             except Exception as e:
                 logger.warning(f"Failed loading Qobuz credentials from env: {e}")
 
+        # 4. Fallback to first account in self.accounts
+        if self.accounts:
+            self._apply_token_dict(self.accounts[0])
+            logger.info("Loaded primary Qobuz account from account pool")
+            return
+
         if os.getenv("QOBUZ_APP_ID"):
             self.app_id = os.getenv("QOBUZ_APP_ID")
         if os.getenv("QOBUZ_APP_SECRET"):
             self.app_secret = os.getenv("QOBUZ_APP_SECRET")
 
+    def is_authenticated(self) -> bool:
+        return bool(self.user_auth_token and self.user_id)
+
+    def rotate_account(self) -> bool:
+        """Rotate to the next account in the pool if one fails."""
+        if not self.accounts or len(self.accounts) <= 1:
+            return False
+        self.active_index = (self.active_index + 1) % len(self.accounts)
+        next_acc = self.accounts[self.active_index]
+        self._apply_token_dict(next_acc)
+        logger.warning(f"[QobuzAuth] Failover: Rotated to account {next_acc.get('id', self.active_index)} (User: {self.user_id})")
+        return True
+
     def _apply_token_dict(self, data: Dict[str, Any]):
-        if data.get("app_id"):
-            self.app_id = str(data["app_id"])
-        if data.get("app_secret"):
-            self.app_secret = str(data["app_secret"])
-        if data.get("user_auth_token"):
-            self.user_auth_token = str(data["user_auth_token"])
-        if data.get("user_id"):
-            self.user_id = str(data["user_id"])
+        app_id = data.get("app_id") or data.get("appId")
+        if app_id:
+            self.app_id = str(app_id)
+        app_secret = data.get("app_secret") or data.get("appSecret")
+        if app_secret:
+            self.app_secret = str(app_secret)
+        user_auth_token = data.get("user_auth_token") or data.get("userAuthToken")
+        if user_auth_token:
+            self.user_auth_token = str(user_auth_token)
+        user_id = data.get("user_id") or data.get("userId")
+        if user_id:
+            self.user_id = str(user_id)
         if data.get("user_email"):
             self.user_email = str(data["user_email"])
         if data.get("membership"):

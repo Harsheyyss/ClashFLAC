@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 
 class QobuzSearchResultItem(BaseModel):
@@ -10,15 +10,15 @@ class QobuzSearchResultItem(BaseModel):
     thumbnail_url: Optional[str] = None
     url: str
     release_date: Optional[str] = None
-    year: Optional[str] = None
+    year: Optional[Union[str, int]] = None
     genre: Optional[str] = None
     explicit: bool = False
     track_number: Optional[int] = None
     disc_number: Optional[int] = None
     audio_quality: Optional[str] = "HI_RES"
     hires: bool = True
-    bit_depth: Optional[int] = 24
-    sampling_rate: Optional[float] = 96.0
+    bit_depth: Optional[Union[int, str]] = 24
+    sampling_rate: Optional[Union[float, int, str]] = 96.0
     isrc: Optional[str] = None
 
 class QobuzTrackResponse(BaseModel):

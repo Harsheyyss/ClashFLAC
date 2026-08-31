@@ -56,27 +56,34 @@ class QobuzAPI:
 
     async def _request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = f"{QobuzConfig.API_BASE}{endpoint}"
-        req_params = dict(params or {})
-        if "app_id" not in req_params:
-            req_params["app_id"] = str(self.auth.app_id or QobuzConfig.DEFAULT_APP_ID)
-        if self.auth.user_auth_token and "user_auth_token" not in req_params:
-            req_params["user_auth_token"] = self.auth.user_auth_token
+        max_attempts = max(1, len(self.auth.accounts)) if self.auth.accounts else 1
         
-        headers = self._get_headers()
-        async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
-            resp = await client.get(url, params=req_params)
-            if resp.status_code == 400 and "app_id" in resp.text.lower():
-                # Try fallback app id
-                for fallback_id in QobuzConfig.FALLBACK_APP_IDS:
-                    if fallback_id != req_params["app_id"]:
-                        req_params["app_id"] = fallback_id
-                        headers["X-App-Id"] = fallback_id
-                        resp2 = await client.get(url, params=req_params)
-                        if resp2.status_code == 200:
-                            self.auth.app_id = fallback_id
-                            return resp2.json()
-            resp.raise_for_status()
-            return resp.json()
+        for attempt in range(max_attempts):
+            req_params = dict(params or {})
+            if "app_id" not in req_params:
+                req_params["app_id"] = str(self.auth.app_id or QobuzConfig.DEFAULT_APP_ID)
+            if self.auth.user_auth_token and "user_auth_token" not in req_params:
+                req_params["user_auth_token"] = self.auth.user_auth_token
+            
+            headers = self._get_headers()
+            async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+                resp = await client.get(url, params=req_params)
+                if resp.status_code == 401 and attempt < max_attempts - 1:
+                    logger.warning(f"Qobuz account {self.auth.user_id} unauthorized (401). Rotating to next account...")
+                    self.auth.rotate_account()
+                    continue
+                if resp.status_code == 400 and "app_id" in resp.text.lower():
+                    # Try fallback app id
+                    for fallback_id in QobuzConfig.FALLBACK_APP_IDS:
+                        if fallback_id != req_params["app_id"]:
+                            req_params["app_id"] = fallback_id
+                            headers["X-App-Id"] = fallback_id
+                            resp2 = await client.get(url, params=req_params)
+                            if resp2.status_code == 200:
+                                self.auth.app_id = fallback_id
+                                return resp2.json()
+                resp.raise_for_status()
+                return resp.json()
 
     async def search(self, query: str, limit: int = 20) -> List[QobuzSearchResultItem]:
         """Search Qobuz catalog for tracks matching query with concurrent multi-query expansion."""
@@ -140,53 +147,43 @@ class QobuzAPI:
         ranked_candidates = sorted(raw_candidates, key=score_item, reverse=True)[:limit]
 
         results = []
-        for item in ranked_candidates:
-            track_id = str(item.get("id") or "")
-            if not track_id:
-                continue
+        for it in ranked_candidates:
+            album_obj = it.get("album", {}) or {}
+            perf_obj = it.get("performer", {}) or it.get("artist", {}) or {}
             
-            title = item.get("title") or "Unknown Title"
-            if item.get("version"):
-                title += f" ({item['version']})"
+            # Extract high-res indicators
+            hi_res = bool(it.get("hires") or it.get("hires_streamable") or (it.get("maximum_bit_depth") or 0) > 16)
+            bit_depth = it.get("maximum_bit_depth") or (24 if hi_res else 16)
+            sampling_rate = it.get("maximum_sampling_rate") or (96.0 if hi_res else 44.1)
 
-            performer = item.get("performer", {})
-            artist = performer.get("name") if isinstance(performer, dict) else (item.get("artist", {}).get("name") or "Unknown Artist")
-
-            album_obj = item.get("album", {})
-            album_title = album_obj.get("title") if isinstance(album_obj, dict) else None
-            
-            image_url = None
-            if isinstance(album_obj, dict) and album_obj.get("image"):
-                img_dict = album_obj["image"]
-                image_url = img_dict.get("large") or img_dict.get("extralarge") or img_dict.get("small") or img_dict.get("thumbnail")
-
-            hires = bool(item.get("hires") or item.get("hires_streamable") or (isinstance(album_obj, dict) and album_obj.get("hires")))
-            bit_depth = item.get("maximum_bit_depth") or (album_obj.get("maximum_bit_depth") if isinstance(album_obj, dict) else 16)
-            sampling_rate = item.get("maximum_sampling_rate") or (album_obj.get("maximum_sampling_rate") if isinstance(album_obj, dict) else 44.1)
-
-            audio_quality = "HI_RES" if hires or (bit_depth and bit_depth > 16) else "CD_LOSSLESS"
-
-            release_date = item.get("release_date_original") or item.get("release_date") or (album_obj.get("release_date_original") if isinstance(album_obj, dict) else None)
-            year = release_date[:4] if release_date and len(release_date) >= 4 else None
+            # Extract hires album cover
+            cover_url = None
+            if isinstance(album_obj, dict):
+                img_obj = album_obj.get("image", {})
+                if isinstance(img_obj, dict):
+                    cover_url = img_obj.get("large") or img_obj.get("small") or img_obj.get("thumbnail")
+                if not cover_url and album_obj.get("cover"):
+                    cover_url = album_obj.get("cover")
 
             results.append(QobuzSearchResultItem(
-                asin=track_id,
-                title=title,
-                artist=artist,
-                album=album_title,
-                duration_sec=int(item.get("duration") or 0),
-                thumbnail_url=image_url,
-                url=f"https://open.qobuz.com/track/{track_id}",
-                release_date=release_date,
-                year=year,
-                explicit=bool(item.get("parental_warning")),
-                track_number=item.get("track_number"),
-                disc_number=item.get("media_number"),
-                audio_quality=audio_quality,
-                hires=hires,
-                bit_depth=int(bit_depth or 16),
-                sampling_rate=float(sampling_rate or 44.1),
-                isrc=item.get("isrc"),
+                asin=str(it.get("id")),
+                title=it.get("title") or "Unknown Title",
+                artist=perf_obj.get("name") or album_obj.get("artist", {}).get("name") or "Unknown Artist",
+                album=album_obj.get("title") or "Single",
+                duration_sec=it.get("duration") or 0,
+                track_number=it.get("track_number") or 1,
+                disc_number=it.get("media_number") or 1,
+                year=str(it.get("parental_warning") or album_obj.get("release_date_original") or "2024")[:4] if album_obj.get("release_date_original") else None,
+                release_date=album_obj.get("release_date_original") or it.get("release_date_original"),
+                genre=album_obj.get("genre", {}).get("name") if isinstance(album_obj.get("genre"), dict) else "Music",
+                hires=hi_res,
+                bit_depth=bit_depth,
+                sampling_rate=float(sampling_rate),
+                audio_quality=f"Hi-Res {bit_depth}-bit/{sampling_rate}kHz" if hi_res else "Lossless CD 16-bit/44.1kHz",
+                explicit=bool(it.get("parental_warning")),
+                isrc=it.get("isrc"),
+                thumbnail_url=cover_url,
+                url=f"https://open.qobuz.com/track/{it.get('id')}"
             ))
 
         return results
@@ -202,7 +199,8 @@ class QobuzAPI:
     async def get_file_url(self, track_id: str, format_id: Optional[int] = None) -> Dict[str, Any]:
         """
         Request direct high-speed CDN audio streaming URL signed with MD5 secret.
-        Automatically checks and selects the highest available quality format (27 -> 7 -> 6 -> 5).
+        Automatically checks and selects the highest available quality format (27 -> 7 -> 6 -> 5)
+        and rotates across the account pool if an account fails.
         """
         candidate_formats = []
         if format_id:
@@ -211,44 +209,54 @@ class QobuzAPI:
             if fid not in candidate_formats:
                 candidate_formats.append(fid)
 
-        secrets = [s for s in [self._valid_secret, self.auth.app_secret, *QobuzConfig.get_secrets()] if s]
+        max_acc_attempts = max(1, len(self.auth.accounts)) if self.auth.accounts else 1
         last_err = None
 
-        for fmt in candidate_formats:
-            for secret in secrets:
-                ts = int(time.time())
-                raw_sig = f"trackgetFileUrlformat_id{fmt}intentstreamtrack_id{track_id}{ts}{secret}"
-                request_sig = hashlib.md5(raw_sig.encode("utf-8")).hexdigest()
-                
-                params = {
-                    "request_ts": ts,
-                    "request_sig": request_sig,
-                    "track_id": track_id,
-                    "format_id": fmt,
-                    "intent": "stream",
-                    "app_id": str(self.auth.app_id or QobuzConfig.DEFAULT_APP_ID),
-                }
-                if self.auth.user_auth_token:
-                    params["user_auth_token"] = self.auth.user_auth_token
+        for acc_attempt in range(max_acc_attempts):
+            secrets = [s for s in [self._valid_secret, self.auth.app_secret, *QobuzConfig.get_secrets()] if s]
+            
+            for fmt in candidate_formats:
+                for secret in secrets:
+                    ts = int(time.time())
+                    raw_sig = f"trackgetFileUrlformat_id{fmt}intentstreamtrack_id{track_id}{ts}{secret}"
+                    request_sig = hashlib.md5(raw_sig.encode("utf-8")).hexdigest()
+                    
+                    params = {
+                        "request_ts": ts,
+                        "request_sig": request_sig,
+                        "track_id": track_id,
+                        "format_id": fmt,
+                        "intent": "stream",
+                        "app_id": str(self.auth.app_id or QobuzConfig.DEFAULT_APP_ID),
+                    }
+                    if self.auth.user_auth_token:
+                        params["user_auth_token"] = self.auth.user_auth_token
 
-                headers = self._get_headers()
-                async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
-                    resp = await client.get(f"{QobuzConfig.API_BASE}track/getFileUrl", params=params)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data.get("url") and "sample" not in data:
-                            self._valid_secret = secret
-                            self.auth.app_secret = secret
-                            data["selected_format_id"] = fmt
-                            return data
-                        elif data.get("url"):
-                            data["selected_format_id"] = fmt
-                            return data
-                    elif resp.status_code == 400:
-                        last_err = resp.text
-                        continue
-                    else:
-                        last_err = f"HTTP {resp.status_code}: {resp.text}"
+                    headers = self._get_headers()
+                    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+                        resp = await client.get(f"{QobuzConfig.API_BASE}track/getFileUrl", params=params)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data.get("url") and "sample" not in data:
+                                self._valid_secret = secret
+                                self.auth.app_secret = secret
+                                data["selected_format_id"] = fmt
+                                return data
+                            elif data.get("url"):
+                                data["selected_format_id"] = fmt
+                                return data
+                        elif resp.status_code == 401:
+                            last_err = f"HTTP 401 (Auth Failed for account {self.auth.user_id}): {resp.text}"
+                            break  # Try next account
+                        elif resp.status_code == 400:
+                            last_err = resp.text
+                            continue
+                        else:
+                            last_err = f"HTTP {resp.status_code}: {resp.text}"
+
+            if acc_attempt < max_acc_attempts - 1:
+                logger.warning(f"Qobuz stream signing failed for account {self.auth.user_id}. Rotating to next account...")
+                self.auth.rotate_account()
 
         raise ValueError(f"Could not retrieve Qobuz stream URL for track {track_id}: {last_err or 'Invalid signature or restricted track'}")
 

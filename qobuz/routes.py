@@ -141,18 +141,23 @@ async def resolve_query_endpoint(q: str):
 
 @router.get("/stream/{track_id}")
 async def stream_endpoint(track_id: str):
-    """Get high-speed browser-compatible audio stream URL (MP3 320kbps) from Qobuz."""
+    """Get direct MAX Hi-Res Lossless / Studio Master streaming URL (up to 24-bit/192kHz FLAC) from Qobuz."""
     try:
-        data = await api_client.get_file_url(track_id, format_id=5)
+        # Request maximum quality studio master (27 -> 7 -> 6 -> 5)
+        data = await api_client.get_file_url(track_id, format_id=27)
         url = data.get("url")
         if not url:
             raise ValueError("No stream URL returned by Qobuz.")
+        fmt_id = data.get("selected_format_id") or data.get("format_id")
+        is_flac = fmt_id in (27, 7, 6)
         return {
             "stream_url": url,
-            "format": "mp3",
-            "bitrate": 320,
+            "format": "flac" if is_flac else "mp3",
+            "format_id": fmt_id,
+            "bit_depth": data.get("bit_depth"),
+            "sampling_rate": data.get("sampling_rate"),
             "track_id": track_id,
-            "mime_type": data.get("mime_type") or "audio/mpeg"
+            "mime_type": data.get("mime_type") or ("audio/flac" if is_flac else "audio/mpeg")
         }
     except Exception as e:
         logger.warning(f"Qobuz stream notice for track {track_id}: {e}")
@@ -224,6 +229,7 @@ async def auth_login_endpoint(req: QobuzAuthLoginRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("/status", response_model=QobuzAuthStatusResponse)
 @router.get("/auth/status", response_model=QobuzAuthStatusResponse)
 async def auth_status_endpoint():
     """Get current Qobuz credentials status."""
